@@ -1,88 +1,97 @@
+/// A simple stack-based virtual machine implemented in Zig.
+/// Supports arithmetic, bitwise, memory, control flow, and function call operations.
+/// Includes example programs and a compile-time assembler for instruction tuples.
 const std = @import("std");
 const print = std.debug.print;
 const Vec = std.array_list.Managed;
 const Allocator = std.mem.Allocator;
 
+/// OpCode: The set of instructions supported by the VM.
 const OpCode = enum(u8) {
     // Basic stack operations
-    PUSH,
-    POP,
-    DUP,
-    SWAP,
+    PUSH, // Push a value onto the stack
+    POP, // Pop a value from the stack
+    DUP, // Duplicate the top value on the stack
+    SWAP, // Swap the top two values on the stack
     // Arithmetic operations
-    ADD,
-    SUB,
-    MUL,
-    DIV,
-    MOD,
-    NEG,
+    ADD, // Add top two values
+    SUB, // Subtract top two values
+    MUL, // Multiply top two values
+    DIV, // Divide top two values
+    MOD, // Modulo of top two values
+    NEG, // Negate top value
     // Bitwise operations
-    AND,
-    OR,
-    XOR,
-    NOT,
-    SHL,
-    SHR,
+    AND, // Bitwise AND
+    OR, // Bitwise OR
+    XOR, // Bitwise XOR
+    NOT, // Bitwise NOT
+    SHL, // Shift left
+    SHR, // Shift right
     // Memory operations
-    LOAD,
-    STORE,
-    LOAD_LOCAL,
-    STORE_LOCAL,
+    LOAD, // Load value from memory
+    STORE, // Store value to memory
+    LOAD_LOCAL, // Load value from local frame
+    STORE_LOCAL, // Store value to local frame
     // Comparison operations
-    EQ,
-    NE,
-    LT,
-    LE,
-    GT,
-    GE,
+    EQ, // Equal
+    NE, // Not equal
+    LT, // Less than
+    LE, // Less than or equal
+    GT, // Greater than
+    GE, // Greater than or equal
     // Control flow
-    JMP,
-    JZ,
-    JNZ,
-    CALL,
-    RET,
+    JMP, // Unconditional jump
+    JZ, // Jump if zero
+    JNZ, // Jump if not zero
+    CALL, // Call function
+    RET, // Return from function
     // I/O and system
-    PRINT,
-    HALT,
+    PRINT, // Print top value
+    HALT, // Halt execution
 };
 
+/// Instruction: Represents a single VM instruction.
 const Instruction = struct {
-    opcode: OpCode,
-    operand: ?i32 = null,
+    opcode: OpCode, // The operation code
+    operand: ?i32 = null, // Optional operand (e.g., value or address)
 };
 
+/// VMError: Error set for VM operations.
 pub const VMError = error{
-    StackUnderflow,
-    StackOverflow,
-    CallStackUnderflow,
-    CallStackOverflow,
-    InvalidMemoryAddress,
-    InvalidLocalAddress,
-    DivisionByZero,
-    ModuloByZero,
-    InvalidInstruction,
-    OutOfMemory,
+    StackUnderflow, // Stack is empty when pop/peek is called
+    StackOverflow, // Stack exceeds maximum size
+    CallStackUnderflow, // Call stack is empty when popping frame
+    CallStackOverflow, // Call stack exceeds maximum size
+    InvalidMemoryAddress, // Memory address out of bounds
+    InvalidLocalAddress, // Local address out of bounds
+    DivisionByZero, // Division by zero attempted
+    ModuloByZero, // Modulo by zero attempted
+    InvalidInstruction, // Instruction is malformed
+    OutOfMemory, // Allocator failed
 };
 
+/// CallFrame: Represents a function call frame for the VM.
 const CallFrame = struct {
-    return_address: usize,
-    frame_pointer: usize,
+    return_address: usize, // Address to return to after RET
+    frame_pointer: usize, // Stack pointer for local variables
 };
 
+/// VM: The virtual machine struct.
 pub const VM = struct {
-    stack: Vec(i32),
-    call_stack: Vec(CallFrame),
-    memory: [4096]i32,
-    pc: usize,
-    sp: usize,
-    fp: usize, // frame pointer
-    running: bool,
-    allocator: Allocator,
+    stack: Vec(i32), // Operand stack
+    call_stack: Vec(CallFrame), // Call stack for function calls
+    memory: [4096]i32, // VM memory
+    pc: usize, // Program counter
+    sp: usize, // Stack pointer
+    fp: usize, // Frame pointer for locals
+    running: bool, // Is VM running
+    allocator: Allocator, // Allocator for dynamic arrays
 
-    const STACK_SIZE = 1024;
-    const CALL_STACK_SIZE = 256;
-    const MEMORY_SIZE = 4096;
+    const STACK_SIZE = 1024; // Maximum stack size
+    const CALL_STACK_SIZE = 256; // Maximum call stack size
+    const MEMORY_SIZE = 4096; // Memory size
 
+    /// Initializes a new VM instance.
     pub fn init(allocator: Allocator) VM {
         return VM{
             .stack = Vec(i32).init(allocator),
@@ -96,12 +105,15 @@ pub const VM = struct {
         };
     }
 
+    /// Deinitializes the VM, freeing resources.
     pub fn deinit(self: *VM) void {
         self.stack.deinit();
         self.call_stack.deinit();
     }
 
-    // Stack operations
+    // --- Stack Operations ---
+
+    /// Pushes a value onto the stack.
     fn push(self: *VM, value: i32) VMError!void {
         if (self.stack.items.len >= STACK_SIZE) {
             return VMError.StackOverflow;
@@ -110,6 +122,7 @@ pub const VM = struct {
         self.sp = self.stack.items.len;
     }
 
+    /// Pops a value from the stack.
     fn pop(self: *VM) VMError!i32 {
         if (self.stack.items.len == 0) {
             return VMError.StackUnderflow;
@@ -119,6 +132,7 @@ pub const VM = struct {
         return value.?;
     }
 
+    /// Peeks at the top value of the stack.
     fn peek(self: *VM) VMError!i32 {
         if (self.stack.items.len == 0) {
             return VMError.StackUnderflow;
@@ -126,7 +140,9 @@ pub const VM = struct {
         return self.stack.items[self.stack.items.len - 1];
     }
 
-    // Call stack operations
+    // --- Call Stack Operations ---
+
+    /// Pushes a call frame onto the call stack.
     fn pushCallFrame(self: *VM, return_address: usize, frame_pointer: usize) VMError!void {
         if (self.call_stack.items.len >= CALL_STACK_SIZE) {
             return VMError.CallStackOverflow;
@@ -137,6 +153,7 @@ pub const VM = struct {
         });
     }
 
+    /// Pops a call frame from the call stack.
     fn popCallFrame(self: *VM) VMError!CallFrame {
         if (self.call_stack.items.len == 0) {
             return VMError.CallStackUnderflow;
@@ -144,7 +161,9 @@ pub const VM = struct {
         return self.call_stack.orderedRemove(self.call_stack.items.len - 1);
     }
 
-    // Execute a single instruction
+    // --- Instruction Execution ---
+
+    /// Executes a single instruction.
     fn executeInstruction(self: *VM, instruction: Instruction) VMError!void {
         switch (instruction.opcode) {
             // Basic stack operations
@@ -376,7 +395,7 @@ pub const VM = struct {
         self.pc += 1;
     }
 
-    // Execute a program
+    /// Executes a program (array of instructions) on the VM.
     pub fn execute(self: *VM, program: []const Instruction) VMError!void {
         self.pc = 0;
         self.running = true;
@@ -386,7 +405,7 @@ pub const VM = struct {
         }
     }
 
-    // Debug helper
+    /// Prints the current state of the VM (for debugging).
     pub fn printState(self: *VM) void {
         print("PC: {}, SP: {}, Stack: [", .{ self.pc, self.sp });
         for (self.stack.items, 0..) |value, i| {
@@ -397,7 +416,8 @@ pub const VM = struct {
     }
 };
 
-// Compile-time assembly function
+/// Assembles a tuple of instructions at compile time into an array.
+/// Usage: assemble(.{ .{.PUSH, 42}, .{.PRINT}, ... })
 pub fn assemble(comptime program: anytype) []const Instruction {
     const program_info = @typeInfo(@TypeOf(program));
     if (program_info != .@"struct") {
@@ -433,18 +453,19 @@ pub fn assemble(comptime program: anytype) []const Instruction {
     return &result;
 }
 
-// Helper macros for cleaner assembly syntax
+/// Helper macro: creates an instruction with no operand.
 pub inline fn instr(opcode: OpCode) Instruction {
     return Instruction{ .opcode = opcode };
 }
 
+/// Helper macro: creates an instruction with an operand.
 pub inline fn instr_op(opcode: OpCode, operand: i32) Instruction {
     return Instruction{ .opcode = opcode, .operand = operand };
 }
 
-// Example programs
+// --- Example Programs ---
 
-// Program 1: Simple arithmetic (5 + 3) * 2 = 16
+/// Program 1: Simple arithmetic (5 + 3) * 2 = 16
 pub const arithmetic_program = [_]Instruction{
     .{ .opcode = .PUSH, .operand = 5 },
     .{ .opcode = .PUSH, .operand = 3 },
@@ -455,7 +476,7 @@ pub const arithmetic_program = [_]Instruction{
     .{ .opcode = .HALT },
 };
 
-// Program 2: Memory operations
+/// Program 2: Memory operations
 pub const memory_program = [_]Instruction{
     .{ .opcode = .PUSH, .operand = 42 }, // Value to store
     .{ .opcode = .PUSH, .operand = 10 }, // Memory address
@@ -466,7 +487,7 @@ pub const memory_program = [_]Instruction{
     .{ .opcode = .HALT },
 };
 
-// Program 3: Conditional jump (count down from 5)
+/// Program 3: Conditional jump (count down from 5)
 pub const countdown_program = [_]Instruction{
     .{ .opcode = .PUSH, .operand = 5 }, // 0: Push initial value
     .{ .opcode = .PUSH, .operand = 0 }, // 1: Push memory address 0
@@ -487,7 +508,7 @@ pub const countdown_program = [_]Instruction{
     .{ .opcode = .HALT }, // 16: Halt
 };
 
-// Program 4: Function call example
+/// Program 4: Function call example
 pub const function_program = [_]Instruction{
     // Main function: call add_function(10, 20)
     .{ .opcode = .PUSH, .operand = 10 }, // 0: Push first argument
@@ -506,7 +527,7 @@ pub const function_program = [_]Instruction{
     .{ .opcode = .RET }, // 11: Return (result on stack)
 };
 
-// Program 5: Bitwise operations demo
+/// Program 5: Bitwise operations demo
 pub const bitwise_program = [_]Instruction{
     .{ .opcode = .PUSH, .operand = 0b1010 }, // 10 in binary
     .{ .opcode = .PUSH, .operand = 0b1100 }, // 12 in binary
@@ -523,7 +544,7 @@ pub const bitwise_program = [_]Instruction{
     .{ .opcode = .HALT },
 };
 
-// Program 6: Advanced function with local variables (factorial)
+/// Program 6: Advanced function with local variables (factorial)
 pub const factorial_program = [_]Instruction{
     // Main: calculate factorial of 5
     .{ .opcode = .PUSH, .operand = 5 }, // 0: Push argument
@@ -550,7 +571,8 @@ pub const factorial_program = [_]Instruction{
     .{ .opcode = .RET }, // 17: Return result
 };
 
-// Compile-time assembled program example
+/// Compile-time assembled program example.
+/// Demonstrates usage of the `assemble` macro for cleaner syntax.
 pub const compiled_program = assemble(.{
     .{ .PUSH, 42 },
     .{.DUP},
