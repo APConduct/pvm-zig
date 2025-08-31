@@ -3,7 +3,48 @@ const print = std.debug.print;
 const Vec = std.array_list.Managed;
 const Allocator = std.mem.Allocator;
 
-const OpCode = enum(u8) { PUSH, POP, ADD, SUB, MUL, DIV, LOAD, STORE, JMP, JZ, JNZ, EQ, LT, GT, PRINT, HALT };
+const OpCode = enum(u8) {
+    // Basic stack operations
+    PUSH,
+    POP,
+    DUP,
+    SWAP,
+    // Arithmetic operations
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    MOD,
+    NEG,
+    // Bitwise operations
+    AND,
+    OR,
+    XOR,
+    NOT,
+    SHL,
+    SHR,
+    // Memory operations
+    LOAD,
+    STORE,
+    LOAD_LOCAL,
+    STORE_LOCAL,
+    // Comparison operations
+    EQ,
+    NE,
+    LT,
+    LE,
+    GT,
+    GE,
+    // Control flow
+    JMP,
+    JZ,
+    JNZ,
+    CALL,
+    RET,
+    // I/O and system
+    PRINT,
+    HALT,
+};
 
 const Instruction = struct {
     opcode: OpCode,
@@ -13,28 +54,43 @@ const Instruction = struct {
 pub const VMError = error{
     StackUnderflow,
     StackOverflow,
+    CallStackUnderflow,
+    CallStackOverflow,
     InvalidMemoryAddress,
+    InvalidLocalAddress,
     DivisionByZero,
+    ModuloByZero,
     InvalidInstruction,
     OutOfMemory,
 };
 
+const CallFrame = struct {
+    return_address: usize,
+    frame_pointer: usize,
+};
+
 pub const VM = struct {
     stack: Vec(i32),
-    memory: [256]i32,
+    call_stack: Vec(CallFrame),
+    memory: [4096]i32,
     pc: usize,
     sp: usize,
+    fp: usize, // frame pointer
     running: bool,
     allocator: Allocator,
 
-    const STACK_SIZE = 256;
+    const STACK_SIZE = 1024;
+    const CALL_STACK_SIZE = 256;
+    const MEMORY_SIZE = 4096;
 
     pub fn init(allocator: Allocator) VM {
         return VM{
             .stack = Vec(i32).init(allocator),
-            .memory = std.mem.zeroes([256]i32),
+            .call_stack = Vec(CallFrame).init(allocator),
+            .memory = std.mem.zeroes([MEMORY_SIZE]i32),
             .pc = 0,
             .sp = 0,
+            .fp = 0,
             .running = true,
             .allocator = allocator,
         };
@@ -42,6 +98,7 @@ pub const VM = struct {
 
     pub fn deinit(self: *VM) void {
         self.stack.deinit();
+        self.call_stack.deinit();
     }
 
     // Stack operations
@@ -69,9 +126,28 @@ pub const VM = struct {
         return self.stack.items[self.stack.items.len - 1];
     }
 
+    // Call stack operations
+    fn pushCallFrame(self: *VM, return_address: usize, frame_pointer: usize) VMError!void {
+        if (self.call_stack.items.len >= CALL_STACK_SIZE) {
+            return VMError.CallStackOverflow;
+        }
+        try self.call_stack.append(CallFrame{
+            .return_address = return_address,
+            .frame_pointer = frame_pointer,
+        });
+    }
+
+    fn popCallFrame(self: *VM) VMError!CallFrame {
+        if (self.call_stack.items.len == 0) {
+            return VMError.CallStackUnderflow;
+        }
+        return self.call_stack.orderedRemove(self.call_stack.items.len - 1);
+    }
+
     // Execute a single instruction
     fn executeInstruction(self: *VM, instruction: Instruction) VMError!void {
         switch (instruction.opcode) {
+            // Basic stack operations
             .PUSH => {
                 const value = instruction.operand orelse return VMError.InvalidInstruction;
                 try self.push(value);
@@ -81,6 +157,19 @@ pub const VM = struct {
                 _ = try self.pop();
             },
 
+            .DUP => {
+                const value = try self.peek();
+                try self.push(value);
+            },
+
+            .SWAP => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(b);
+                try self.push(a);
+            },
+
+            // Arithmetic operations
             .ADD => {
                 const b = try self.pop();
                 const a = try self.pop();
@@ -106,9 +195,58 @@ pub const VM = struct {
                 try self.push(@divTrunc(a, b));
             },
 
+            .MOD => {
+                const b = try self.pop();
+                if (b == 0) return VMError.ModuloByZero;
+                const a = try self.pop();
+                try self.push(@mod(a, b));
+            },
+
+            .NEG => {
+                const a = try self.pop();
+                try self.push(-a);
+            },
+
+            // Bitwise operations
+            .AND => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(a & b);
+            },
+
+            .OR => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(a | b);
+            },
+
+            .XOR => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(a ^ b);
+            },
+
+            .NOT => {
+                const a = try self.pop();
+                try self.push(~a);
+            },
+
+            .SHL => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(a << @intCast(b));
+            },
+
+            .SHR => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(a >> @intCast(b));
+            },
+
+            // Memory operations
             .LOAD => {
                 const addr = try self.pop();
-                if (addr < 0 or addr >= self.memory.len) {
+                if (addr < 0 or addr >= MEMORY_SIZE) {
                     return VMError.InvalidMemoryAddress;
                 }
                 const value = self.memory[@intCast(addr)];
@@ -118,12 +256,33 @@ pub const VM = struct {
             .STORE => {
                 const addr = try self.pop();
                 const value = try self.pop();
-                if (addr < 0 or addr >= self.memory.len) {
+                if (addr < 0 or addr >= MEMORY_SIZE) {
                     return VMError.InvalidMemoryAddress;
                 }
                 self.memory[@intCast(addr)] = value;
             },
 
+            .LOAD_LOCAL => {
+                const offset = instruction.operand orelse return VMError.InvalidInstruction;
+                const addr = @as(i32, @intCast(self.fp)) + offset;
+                if (addr < 0 or addr >= MEMORY_SIZE) {
+                    return VMError.InvalidLocalAddress;
+                }
+                const value = self.memory[@intCast(addr)];
+                try self.push(value);
+            },
+
+            .STORE_LOCAL => {
+                const offset = instruction.operand orelse return VMError.InvalidInstruction;
+                const value = try self.pop();
+                const addr = @as(i32, @intCast(self.fp)) + offset;
+                if (addr < 0 or addr >= MEMORY_SIZE) {
+                    return VMError.InvalidLocalAddress;
+                }
+                self.memory[@intCast(addr)] = value;
+            },
+
+            // Control flow
             .JMP => {
                 const addr = instruction.operand orelse return VMError.InvalidInstruction;
                 if (addr < 0) return VMError.InvalidInstruction;
@@ -151,10 +310,33 @@ pub const VM = struct {
                 }
             },
 
+            .CALL => {
+                const addr = instruction.operand orelse return VMError.InvalidInstruction;
+                if (addr < 0) return VMError.InvalidInstruction;
+                try self.pushCallFrame(self.pc + 1, self.fp);
+                self.fp = self.sp;
+                self.pc = @intCast(addr);
+                return; // Don't increment PC
+            },
+
+            .RET => {
+                const frame = try self.popCallFrame();
+                self.fp = frame.frame_pointer;
+                self.pc = frame.return_address;
+                return; // Don't increment PC
+            },
+
+            // Comparison operations
             .EQ => {
                 const b = try self.pop();
                 const a = try self.pop();
                 try self.push(if (a == b) 1 else 0);
+            },
+
+            .NE => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(if (a != b) 1 else 0);
             },
 
             .LT => {
@@ -163,10 +345,22 @@ pub const VM = struct {
                 try self.push(if (a < b) 1 else 0);
             },
 
+            .LE => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(if (a <= b) 1 else 0);
+            },
+
             .GT => {
                 const b = try self.pop();
                 const a = try self.pop();
                 try self.push(if (a > b) 1 else 0);
+            },
+
+            .GE => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(if (a >= b) 1 else 0);
             },
 
             .PRINT => {
@@ -202,6 +396,51 @@ pub const VM = struct {
         print("]\n");
     }
 };
+
+// Compile-time assembly function
+pub fn assemble(comptime program: anytype) []const Instruction {
+    const program_info = @typeInfo(@TypeOf(program));
+    if (program_info != .@"struct") {
+        @compileError("Program must be a tuple (struct)");
+    }
+
+    const fields = program_info.@"struct".fields;
+    comptime var instructions: [fields.len]Instruction = undefined;
+
+    inline for (fields, 0..) |field, i| {
+        const tuple_item = @field(program, field.name);
+        const tuple_info = @typeInfo(@TypeOf(tuple_item));
+
+        if (tuple_info != .@"struct") {
+            @compileError("Each instruction must be a tuple");
+        }
+
+        const tuple_fields = tuple_info.@"struct".fields;
+        if (tuple_fields.len < 1 or tuple_fields.len > 2) {
+            @compileError("Each instruction tuple must have 1 or 2 elements: {opcode} or {opcode, operand}");
+        }
+
+        const opcode = @field(tuple_item, tuple_fields[0].name);
+        const operand = if (tuple_fields.len > 1) @field(tuple_item, tuple_fields[1].name) else null;
+
+        instructions[i] = Instruction{
+            .opcode = opcode,
+            .operand = operand,
+        };
+    }
+
+    const result = instructions;
+    return &result;
+}
+
+// Helper macros for cleaner assembly syntax
+pub inline fn instr(opcode: OpCode) Instruction {
+    return Instruction{ .opcode = opcode };
+}
+
+pub inline fn instr_op(opcode: OpCode, operand: i32) Instruction {
+    return Instruction{ .opcode = opcode, .operand = operand };
+}
 
 // Example programs
 
@@ -247,3 +486,76 @@ pub const countdown_program = [_]Instruction{
     .{ .opcode = .JMP, .operand = 3 }, // 15: Jump back to loop start
     .{ .opcode = .HALT }, // 16: Halt
 };
+
+// Program 4: Function call example
+pub const function_program = [_]Instruction{
+    // Main function: call add_function(10, 20)
+    .{ .opcode = .PUSH, .operand = 10 }, // 0: Push first argument
+    .{ .opcode = .PUSH, .operand = 20 }, // 1: Push second argument
+    .{ .opcode = .CALL, .operand = 6 }, // 2: Call function at address 6
+    .{ .opcode = .PRINT }, // 3: Print result
+    .{ .opcode = .HALT }, // 4: Halt
+    .{ .opcode = .HALT }, // 5: Safety halt
+
+    // add_function: adds two numbers passed on stack
+    .{ .opcode = .STORE_LOCAL, .operand = 1 }, // 6: Store second arg as local[1]
+    .{ .opcode = .STORE_LOCAL, .operand = 0 }, // 7: Store first arg as local[0]
+    .{ .opcode = .LOAD_LOCAL, .operand = 0 }, // 8: Load first arg
+    .{ .opcode = .LOAD_LOCAL, .operand = 1 }, // 9: Load second arg
+    .{ .opcode = .ADD }, // 10: Add them
+    .{ .opcode = .RET }, // 11: Return (result on stack)
+};
+
+// Program 5: Bitwise operations demo
+pub const bitwise_program = [_]Instruction{
+    .{ .opcode = .PUSH, .operand = 0b1010 }, // 10 in binary
+    .{ .opcode = .PUSH, .operand = 0b1100 }, // 12 in binary
+    .{ .opcode = .AND }, // 10 & 12 = 8 (0b1000)
+    .{ .opcode = .PRINT },
+    .{ .opcode = .PUSH, .operand = 0b1010 }, // 10 in binary
+    .{ .opcode = .PUSH, .operand = 0b1100 }, // 12 in binary
+    .{ .opcode = .OR }, // 10 | 12 = 14 (0b1110)
+    .{ .opcode = .PRINT },
+    .{ .opcode = .PUSH, .operand = 5 },
+    .{ .opcode = .PUSH, .operand = 1 },
+    .{ .opcode = .SHL }, // 5 << 1 = 10
+    .{ .opcode = .PRINT },
+    .{ .opcode = .HALT },
+};
+
+// Program 6: Advanced function with local variables (factorial)
+pub const factorial_program = [_]Instruction{
+    // Main: calculate factorial of 5
+    .{ .opcode = .PUSH, .operand = 5 }, // 0: Push argument
+    .{ .opcode = .CALL, .operand = 4 }, // 1: Call factorial function
+    .{ .opcode = .PRINT }, // 2: Print result
+    .{ .opcode = .HALT }, // 3: Halt
+
+    // factorial(n): recursive factorial function
+    .{ .opcode = .STORE_LOCAL, .operand = 0 }, // 4: Store n in local[0]
+    .{ .opcode = .LOAD_LOCAL, .operand = 0 }, // 5: Load n
+    .{ .opcode = .PUSH, .operand = 1 }, // 6: Push 1
+    .{ .opcode = .LE }, // 7: Check if n <= 1
+    .{ .opcode = .JZ, .operand = 11 }, // 8: If not, jump to recursive case
+    .{ .opcode = .PUSH, .operand = 1 }, // 9: Base case: return 1
+    .{ .opcode = .RET }, // 10: Return
+
+    // Recursive case: n * factorial(n-1)
+    .{ .opcode = .LOAD_LOCAL, .operand = 0 }, // 11: Load n
+    .{ .opcode = .LOAD_LOCAL, .operand = 0 }, // 12: Load n again
+    .{ .opcode = .PUSH, .operand = 1 }, // 13: Push 1
+    .{ .opcode = .SUB }, // 14: n - 1
+    .{ .opcode = .CALL, .operand = 4 }, // 15: Call factorial(n-1)
+    .{ .opcode = .MUL }, // 16: n * factorial(n-1)
+    .{ .opcode = .RET }, // 17: Return result
+};
+
+// Compile-time assembled program example
+pub const compiled_program = assemble(.{
+    .{ .PUSH, 42 },
+    .{.DUP},
+    .{.PRINT},
+    .{.SWAP},
+    .{.PRINT},
+    .{.HALT},
+});
